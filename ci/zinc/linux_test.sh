@@ -50,6 +50,9 @@ $ZIG fmt --check . --exclude test/compile_errors/
 # Build stage2 standalone so that we can test stage2 against stage2 compiler-rt.
 $ZIG build -p stage2 -Denable-llvm -Duse-zig-libcxx
 
+# Ensure that stage2 can build itself.
+./stage2/bin/zig build -p stage3 -Denable-llvm -Duse-zig-libcxx
+
 stage2/bin/zig test test/behavior.zig -I test -fLLVM
 stage2/bin/zig test test/behavior.zig -I test -fno-LLVM
 stage2/bin/zig test test/behavior.zig -I test -fLLVM    -target aarch64-linux --test-cmd qemu-aarch64 --test-cmd-bin
