@@ -331,7 +331,7 @@ pub const DeclState = struct {
                     },
                     else => {
                         // DW.AT.name, DW.FORM.string
-                        const struct_name = try ty.nameAllocArena(arena, target);
+                        const struct_name = try ty.nameAllocArena(arena, module);
                         try dbg_info_buffer.ensureUnusedCapacity(struct_name.len + 1);
                         dbg_info_buffer.appendSliceAssumeCapacity(struct_name);
                         dbg_info_buffer.appendAssumeCapacity(0);
@@ -372,7 +372,7 @@ pub const DeclState = struct {
                 const abi_size = ty.abiSize(target);
                 try leb128.writeULEB128(dbg_info_buffer.writer(), abi_size);
                 // DW.AT.name, DW.FORM.string
-                const enum_name = try ty.nameAllocArena(arena, target);
+                const enum_name = try ty.nameAllocArena(arena, module);
                 try dbg_info_buffer.ensureUnusedCapacity(enum_name.len + 1);
                 dbg_info_buffer.appendSliceAssumeCapacity(enum_name);
                 dbg_info_buffer.appendAssumeCapacity(0);
@@ -410,7 +410,7 @@ pub const DeclState = struct {
                 const payload_offset = if (layout.tag_align >= layout.payload_align) layout.tag_size else 0;
                 const tag_offset = if (layout.tag_align >= layout.payload_align) 0 else layout.payload_size;
                 const is_tagged = layout.tag_size > 0;
-                const union_name = try ty.nameAllocArena(arena, target);
+                const union_name = try ty.nameAllocArena(arena, module);
 
                 // TODO this is temporary to match current state of unions in Zig - we don't yet have
                 // safety checks implemented meaning the implicit tag is not yet stored and generated
@@ -507,7 +507,7 @@ pub const DeclState = struct {
                 // DW.AT.byte_size, DW.FORM.sdata
                 try leb128.writeULEB128(dbg_info_buffer.writer(), abi_size);
                 // DW.AT.name, DW.FORM.string
-                const name = try ty.nameAllocArena(arena, target);
+                const name = try ty.nameAllocArena(arena, module);
                 try dbg_info_buffer.writer().print("{s}\x00", .{name});
 
                 // DW.AT.member
@@ -654,11 +654,11 @@ pub fn deinit(self: *Dwarf) void {
 
 /// Initializes Decl's state and its matching output buffers.
 /// Call this before `commitDeclState`.
-pub fn initDeclState(self: *Dwarf, decl: *Module.Decl) !DeclState {
+pub fn initDeclState(self: *Dwarf, mod: *Module, decl: *Module.Decl) !DeclState {
     const tracy = trace(@src());
     defer tracy.end();
 
-    const decl_name = try decl.getFullyQualifiedName(self.allocator);
+    const decl_name = try decl.getFullyQualifiedName(mod);
     defer self.allocator.free(decl_name);
 
     log.debug("initDeclState {s}{*}", .{ decl_name, decl });
@@ -2133,7 +2133,7 @@ fn addDbgInfoErrorSet(
     const abi_size = ty.abiSize(target);
     try leb128.writeULEB128(dbg_info_buffer.writer(), abi_size);
     // DW.AT.name, DW.FORM.string
-    const name = try ty.nameAllocArena(arena, target);
+    const name = try ty.nameAllocArena(arena, module);
     try dbg_info_buffer.writer().print("{s}\x00", .{name});
 
     // DW.AT.enumerator

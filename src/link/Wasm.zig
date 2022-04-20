@@ -476,8 +476,9 @@ pub fn deinit(self: *Wasm) void {
     self.string_table.deinit(gpa);
 }
 
-pub fn allocateDeclIndexes(self: *Wasm, decl: *Module.Decl) !void {
+pub fn allocateDeclIndexes(self: *Wasm, decl_index: Module.Decl.Index) !void {
     if (self.llvm_object) |_| return;
+    const decl = self.base.options.module.?.declPtr(decl_index);
     if (decl.link.wasm.sym_index != 0) return;
 
     try self.symbols.ensureUnusedCapacity(self.base.allocator, 1);
@@ -502,14 +503,15 @@ pub fn allocateDeclIndexes(self: *Wasm, decl: *Module.Decl) !void {
     try self.symbol_atom.putNoClobber(self.base.allocator, atom.symbolLoc(), atom);
 }
 
-pub fn updateFunc(self: *Wasm, module: *Module, func: *Module.Fn, air: Air, liveness: Liveness) !void {
+pub fn updateFunc(self: *Wasm, mod: *Module, func: *Module.Fn, air: Air, liveness: Liveness) !void {
     if (build_options.skip_non_native and builtin.object_format != .wasm) {
         @panic("Attempted to compile for object format that was disabled by build configuration");
     }
     if (build_options.have_llvm) {
-        if (self.llvm_object) |llvm_object| return llvm_object.updateFunc(module, func, air, liveness);
+        if (self.llvm_object) |llvm_object| return llvm_object.updateFunc(mod, func, air, liveness);
     }
-    const decl = func.owner_decl;
+    const decl_index = func.owner_decl;
+    const decl = mod.declPtr(decl_index);
     assert(decl.link.wasm.sym_index != 0); // Must call allocateDeclIndexes()
 
     decl.link.wasm.clear();
@@ -530,7 +532,7 @@ pub fn updateFunc(self: *Wasm, module: *Module, func: *Module.Fn, air: Air, live
         .appended => code_writer.items,
         .fail => |em| {
             decl.analysis = .codegen_failure;
-            try module.failed_decls.put(module.gpa, decl, em);
+            try mod.failed_decls.put(mod.gpa, decl_index, em);
             return;
         },
     };
@@ -540,14 +542,15 @@ pub fn updateFunc(self: *Wasm, module: *Module, func: *Module.Fn, air: Air, live
 
 // Generate code for the Decl, storing it in memory to be later written to
 // the file on flush().
-pub fn updateDecl(self: *Wasm, module: *Module, decl: *Module.Decl) !void {
+pub fn updateDecl(self: *Wasm, mod: *Module, decl_index: Module.Decl.Index) !void {
     if (build_options.skip_non_native and builtin.object_format != .wasm) {
         @panic("Attempted to compile for object format that was disabled by build configuration");
     }
     if (build_options.have_llvm) {
-        if (self.llvm_object) |llvm_object| return llvm_object.updateDecl(module, decl);
+        if (self.llvm_object) |llvm_object| return llvm_object.updateDecl(mod, decl_index);
     }
 
+    const decl = mod.declPtr(decl_index);
     assert(decl.link.wasm.sym_index != 0); // Must call allocateDeclIndexes()
 
     decl.link.wasm.clear();
@@ -580,7 +583,7 @@ pub fn updateDecl(self: *Wasm, module: *Module, decl: *Module.Decl) !void {
         .appended => code_writer.items,
         .fail => |em| {
             decl.analysis = .codegen_failure;
-            try module.failed_decls.put(module.gpa, decl, em);
+            try mod.failed_decls.put(mod.gpa, decl_index, em);
             return;
         },
     };
@@ -590,12 +593,13 @@ pub fn updateDecl(self: *Wasm, module: *Module, decl: *Module.Decl) !void {
 
 fn finishUpdateDecl(self: *Wasm, decl: *Module.Decl, code: []const u8) !void {
     if (code.len == 0) return;
+    const mod = self.base.options.module.?;
     const atom: *Atom = &decl.link.wasm;
     atom.size = @intCast(u32, code.len);
     atom.alignment = decl.ty.abiAlignment(self.base.options.target);
     const symbol = &self.symbols.items[atom.sym_index];
 
-    const full_name = try decl.getFullyQualifiedName(self.base.allocator);
+    const full_name = try decl.getFullyQualifiedName(mod);
     defer self.base.allocator.free(full_name);
     symbol.name = try self.string_table.put(self.base.allocator, full_name);
     try atom.code.appendSlice(self.base.allocator, code);
@@ -606,12 +610,15 @@ fn finishUpdateDecl(self: *Wasm, decl: *Module.Decl, code: []const u8) !void {
 /// Lowers a constant typed value to a local symbol and atom.
 /// Returns the symbol index of the local
 /// The given `decl` is the parent decl whom owns the constant.
-pub fn lowerUnnamedConst(self: *Wasm, decl: *Module.Decl, tv: TypedValue) !u32 {
+pub fn lowerUnnamedConst(self: *Wasm, tv: TypedValue, decl_index: Module.Decl.Index) !u32 {
     assert(tv.ty.zigTypeTag() != .Fn); // cannot create local symbols for functions
+
+    const mod = self.base.options.module.?;
+    const decl = mod.declPtr(decl_index);
 
     // Create and initialize a new local symbol and atom
     const local_index = decl.link.wasm.locals.items.len;
-    const fqdn = try decl.getFullyQualifiedName(self.base.allocator);
+    const fqdn = try decl.getFullyQualifiedName(mod);
     defer self.base.allocator.free(fqdn);
     const name = try std.fmt.allocPrintZ(self.base.allocator, "__unnamed_{s}_{d}", .{ fqdn, local_index });
     defer self.base.allocator.free(name);
@@ -641,7 +648,6 @@ pub fn lowerUnnamedConst(self: *Wasm, decl: *Module.Decl, tv: TypedValue) !u32 {
     var value_bytes = std.ArrayList(u8).init(self.base.allocator);
     defer value_bytes.deinit();
 
-    const module = self.base.options.module.?;
     const result = try codegen.generateSymbol(
         &self.base,
         decl.srcLoc(),
@@ -658,7 +664,7 @@ pub fn lowerUnnamedConst(self: *Wasm, decl: *Module.Decl, tv: TypedValue) !u32 {
         .appended => value_bytes.items,
         .fail => |em| {
             decl.analysis = .codegen_failure;
-            try module.failed_decls.put(module.gpa, decl, em);
+            try mod.failed_decls.put(mod.gpa, decl_index, em);
             return error.AnalysisFail;
         },
     };
@@ -722,21 +728,23 @@ pub fn deleteExport(self: *Wasm, exp: Export) void {
 
 pub fn updateDeclExports(
     self: *Wasm,
-    module: *Module,
-    decl: *const Module.Decl,
+    mod: *Module,
+    decl_index: Module.Decl.Index,
     exports: []const *Module.Export,
 ) !void {
     if (build_options.skip_non_native and builtin.object_format != .wasm) {
         @panic("Attempted to compile for object format that was disabled by build configuration");
     }
     if (build_options.have_llvm) {
-        if (self.llvm_object) |llvm_object| return llvm_object.updateDeclExports(module, decl, exports);
+        if (self.llvm_object) |llvm_object| return llvm_object.updateDeclExports(mod, decl_index, exports);
     }
+
+    const decl = mod.declPtr(decl_index);
 
     for (exports) |exp| {
         if (exp.options.section) |section| {
-            try module.failed_exports.putNoClobber(module.gpa, exp, try Module.ErrorMsg.create(
-                module.gpa,
+            try mod.failed_exports.putNoClobber(mod.gpa, exp, try Module.ErrorMsg.create(
+                mod.gpa,
                 decl.srcLoc(),
                 "Unimplemented: ExportOptions.section '{s}'",
                 .{section},
@@ -754,8 +762,8 @@ pub fn updateDeclExports(
             // are strong symbols, we have a linker error.
             // In the other case we replace one with the other.
             if (!exp_is_weak and !existing_sym.isWeak()) {
-                try module.failed_exports.put(module.gpa, exp, try Module.ErrorMsg.create(
-                    module.gpa,
+                try mod.failed_exports.put(mod.gpa, exp, try Module.ErrorMsg.create(
+                    mod.gpa,
                     decl.srcLoc(),
                     \\LinkError: symbol '{s}' defined multiple times
                     \\  first definition in '{s}'
@@ -773,8 +781,9 @@ pub fn updateDeclExports(
             }
         }
 
-        const sym_index = exp.exported_decl.link.wasm.sym_index;
-        const sym_loc = exp.exported_decl.link.wasm.symbolLoc();
+        const exported_decl = mod.declPtr(exp.exported_decl);
+        const sym_index = exported_decl.link.wasm.sym_index;
+        const sym_loc = exported_decl.link.wasm.symbolLoc();
         const symbol = sym_loc.getSymbol(self);
         switch (exp.options.linkage) {
             .Internal => {
@@ -786,8 +795,8 @@ pub fn updateDeclExports(
             },
             .Strong => {}, // symbols are strong by default
             .LinkOnce => {
-                try module.failed_exports.putNoClobber(module.gpa, exp, try Module.ErrorMsg.create(
-                    module.gpa,
+                try mod.failed_exports.putNoClobber(mod.gpa, exp, try Module.ErrorMsg.create(
+                    mod.gpa,
                     decl.srcLoc(),
                     "Unimplemented: LinkOnce",
                     .{},
@@ -1414,8 +1423,8 @@ fn populateErrorNameTable(self: *Wasm) !void {
 
     // Addend for each relocation to the table
     var addend: u32 = 0;
-    const module = self.base.options.module.?;
-    for (module.error_name_list.items) |error_name| {
+    const mod = self.base.options.module.?;
+    for (mod.error_name_list.items) |error_name| {
         const len = @intCast(u32, error_name.len + 1); // names are 0-termianted
 
         const slice_ty = Type.initTag(.const_slice_u8_sentinel_0);
@@ -2045,7 +2054,7 @@ fn linkWithLLD(self: *Wasm, comp: *Compilation, prog_node: *std.Progress.Node) !
 
     // If there is no Zig code to compile, then we should skip flushing the output file because it
     // will not be part of the linker line anyway.
-    const module_obj_path: ?[]const u8 = if (self.base.options.module) |module| blk: {
+    const module_obj_path: ?[]const u8 = if (self.base.options.module) |mod| blk: {
         const use_stage1 = build_options.is_stage1 and self.base.options.use_stage1;
         if (use_stage1) {
             const obj_basename = try std.zig.binNameAlloc(arena, .{
@@ -2054,7 +2063,7 @@ fn linkWithLLD(self: *Wasm, comp: *Compilation, prog_node: *std.Progress.Node) !
                 .output_mode = .Obj,
             });
             switch (self.base.options.cache_mode) {
-                .incremental => break :blk try module.zig_cache_artifact_directory.join(
+                .incremental => break :blk try mod.zig_cache_artifact_directory.join(
                     arena,
                     &[_][]const u8{obj_basename},
                 ),
@@ -2253,7 +2262,7 @@ fn linkWithLLD(self: *Wasm, comp: *Compilation, prog_node: *std.Progress.Node) !
         }
 
         if (auto_export_symbols) {
-            if (self.base.options.module) |module| {
+            if (self.base.options.module) |mod| {
                 // when we use stage1, we use the exports that stage1 provided us.
                 // For stage2, we can directly retrieve them from the module.
                 const use_stage1 = build_options.is_stage1 and self.base.options.use_stage1;
@@ -2264,14 +2273,15 @@ fn linkWithLLD(self: *Wasm, comp: *Compilation, prog_node: *std.Progress.Node) !
                 } else {
                     const skip_export_non_fn = target.os.tag == .wasi and
                         self.base.options.wasi_exec_model == .command;
-                    for (module.decl_exports.values()) |exports| {
+                    for (mod.decl_exports.values()) |exports| {
                         for (exports) |exprt| {
-                            if (skip_export_non_fn and exprt.exported_decl.ty.zigTypeTag() != .Fn) {
+                            const exported_decl = mod.declPtr(exprt.exported_decl);
+                            if (skip_export_non_fn and exported_decl.ty.zigTypeTag() != .Fn) {
                                 // skip exporting symbols when we're building a WASI command
                                 // and the symbol is not a function
                                 continue;
                             }
-                            const symbol_name = exprt.exported_decl.name;
+                            const symbol_name = exported_decl.name;
                             const arg = try std.fmt.allocPrint(arena, "--export={s}", .{symbol_name});
                             try argv.append(arg);
                         }

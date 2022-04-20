@@ -1,6 +1,7 @@
 const std = @import("std");
 const Type = @import("type.zig").Type;
 const Value = @import("value.zig").Value;
+const Module = @import("Module.zig");
 const Allocator = std.mem.Allocator;
 const TypedValue = @This();
 const Target = std.Target;
@@ -48,7 +49,7 @@ const max_aggregate_items = 100;
 
 const FormatContext = struct {
     tv: TypedValue,
-    target: Target,
+    mod: *Module,
 };
 
 pub fn format(
@@ -59,7 +60,7 @@ pub fn format(
 ) !void {
     _ = options;
     comptime std.debug.assert(fmt.len == 0);
-    return ctx.tv.print(writer, 3, ctx.target);
+    return ctx.tv.print(writer, 3, ctx.module);
 }
 
 /// Prints the Value according to the Type, not according to the Value Tag.
@@ -67,8 +68,9 @@ pub fn print(
     tv: TypedValue,
     writer: anytype,
     level: u8,
-    target: std.Target,
+    mod: *Module,
 ) @TypeOf(writer).Error!void {
+    const target = mod.getTarget();
     var val = tv.val;
     var ty = tv.ty;
     while (true) switch (val.tag()) {
@@ -226,7 +228,8 @@ pub fn print(
         .extern_fn => return writer.writeAll("(extern function)"),
         .variable => return writer.writeAll("(variable)"),
         .decl_ref_mut => {
-            const decl = val.castTag(.decl_ref_mut).?.data.decl;
+            const decl_index = val.castTag(.decl_ref_mut).?.data.decl;
+            const decl = mod.declPtr(decl_index);
             if (level == 0) {
                 return writer.print("(decl ref mut '{s}')", .{decl.name});
             }
@@ -236,7 +239,8 @@ pub fn print(
             }, writer, level - 1, target);
         },
         .decl_ref => {
-            const decl = val.castTag(.decl_ref).?.data;
+            const decl_index = val.castTag(.decl_ref).?.data;
+            const decl = mod.declPtr(decl_index);
             if (level == 0) {
                 return writer.print("(decl ref '{s}')", .{decl.name});
             }

@@ -1009,7 +1009,7 @@ pub const DeclGen = struct {
 
     fn renderStructTypedef(dg: *DeclGen, t: Type) error{ OutOfMemory, AnalysisFail }![]const u8 {
         const struct_obj = t.castTag(.@"struct").?.data; // Handle 0 bit types elsewhere.
-        const fqn = try struct_obj.getFullyQualifiedName(dg.typedefs.allocator);
+        const fqn = try struct_obj.getFullyQualifiedName(dg.module);
         defer dg.typedefs.allocator.free(fqn);
 
         var buffer = std.ArrayList(u8).init(dg.typedefs.allocator);
@@ -1090,7 +1090,7 @@ pub const DeclGen = struct {
 
     fn renderUnionTypedef(dg: *DeclGen, t: Type) error{ OutOfMemory, AnalysisFail }![]const u8 {
         const union_ty = t.cast(Type.Payload.Union).?.data;
-        const fqn = try union_ty.getFullyQualifiedName(dg.typedefs.allocator);
+        const fqn = try union_ty.getFullyQualifiedName(dg.module);
         defer dg.typedefs.allocator.free(fqn);
 
         const target = dg.module.getTarget();
@@ -1536,7 +1536,7 @@ pub const DeclGen = struct {
     }
 
     fn renderDeclName(dg: DeclGen, writer: anytype, decl: *Decl) !void {
-        decl.markAlive();
+        dg.module.markDeclAlive(decl);
 
         if (dg.module.decl_exports.get(decl)) |exports| {
             return writer.writeAll(exports[0].options.name);
@@ -1544,7 +1544,7 @@ pub const DeclGen = struct {
             return writer.writeAll(mem.sliceTo(decl.name, 0));
         } else {
             const gpa = dg.module.gpa;
-            const name = try decl.getFullyQualifiedName(gpa);
+            const name = try decl.getFullyQualifiedName(dg.module);
             defer gpa.free(name);
             return writer.print("{ }", .{fmtIdent(name)});
         }

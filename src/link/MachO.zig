@@ -254,7 +254,7 @@ const Entry = struct {
     atom: *Atom,
 };
 
-const UnnamedConstTable = std.AutoHashMapUnmanaged(*Module.Decl, std.ArrayListUnmanaged(*Atom));
+const UnnamedConstTable = std.AutoHashMapUnmanaged(Module.Decl.Index, std.ArrayListUnmanaged(*Atom));
 
 const PendingUpdate = union(enum) {
     resolve_undef: u32,
@@ -3652,8 +3652,9 @@ pub fn allocateTlvPtrEntry(self: *MachO, target: Atom.Relocation.Target) !u32 {
     return index;
 }
 
-pub fn allocateDeclIndexes(self: *MachO, decl: *Module.Decl) !void {
+pub fn allocateDeclIndexes(self: *MachO, decl_index: Module.Decl.Index) !void {
     if (self.llvm_object) |_| return;
+    const decl = self.base.options.module.?.declPtr(decl_index);
     if (decl.link.macho.local_sym_index != 0) return;
 
     decl.link.macho.local_sym_index = try self.allocateLocalSymbol();
@@ -3676,7 +3677,8 @@ pub fn updateFunc(self: *MachO, module: *Module, func: *Module.Fn, air: Air, liv
     const tracy = trace(@src());
     defer tracy.end();
 
-    const decl = func.owner_decl;
+    const decl_index = func.owner_decl;
+    const decl = module.declPtr(decl_index);
     self.freeUnnamedConsts(decl);
 
     // TODO clearing the code and relocs buffer should probably be orchestrated
@@ -3690,7 +3692,7 @@ pub fn updateFunc(self: *MachO, module: *Module, func: *Module.Fn, air: Air, liv
     defer code_buffer.deinit();
 
     var decl_state = if (self.d_sym) |*d_sym|
-        try d_sym.dwarf.initDeclState(decl)
+        try d_sym.dwarf.initDeclState(module, decl)
     else
         null;
     defer if (decl_state) |*ds| ds.deinit();
@@ -3708,7 +3710,7 @@ pub fn updateFunc(self: *MachO, module: *Module, func: *Module.Fn, air: Air, liv
         },
         .fail => |em| {
             decl.analysis = .codegen_failure;
-            try module.failed_decls.put(module.gpa, decl, em);
+            try module.failed_decls.put(module.gpa, decl_index, em);
             return;
         },
     }
@@ -3728,22 +3730,23 @@ pub fn updateFunc(self: *MachO, module: *Module, func: *Module.Fn, air: Air, liv
 
     // Since we updated the vaddr and the size, each corresponding export symbol also
     // needs to be updated.
-    const decl_exports = module.decl_exports.get(decl) orelse &[0]*Module.Export{};
-    try self.updateDeclExports(module, decl, decl_exports);
+    const decl_exports = module.decl_exports.get(decl_index) orelse &[0]*Module.Export{};
+    try self.updateDeclExports(module, decl_index, decl_exports);
 }
 
-pub fn lowerUnnamedConst(self: *MachO, typed_value: TypedValue, decl: *Module.Decl) !u32 {
+pub fn lowerUnnamedConst(self: *MachO, typed_value: TypedValue, decl_index: Module.Decl.Index) !u32 {
     var code_buffer = std.ArrayList(u8).init(self.base.allocator);
     defer code_buffer.deinit();
 
     const module = self.base.options.module.?;
-    const gop = try self.unnamed_const_atoms.getOrPut(self.base.allocator, decl);
+    const gop = try self.unnamed_const_atoms.getOrPut(self.base.allocator, decl_index);
     if (!gop.found_existing) {
         gop.value_ptr.* = .{};
     }
     const unnamed_consts = gop.value_ptr;
 
-    const decl_name = try decl.getFullyQualifiedName(self.base.allocator);
+    const decl = module.declPtr(decl_index);
+    const decl_name = try decl.getFullyQualifiedName(module);
     defer self.base.allocator.free(decl_name);
 
     const name_str_index = blk: {
@@ -3769,7 +3772,7 @@ pub fn lowerUnnamedConst(self: *MachO, typed_value: TypedValue, decl: *Module.De
         .appended => code_buffer.items,
         .fail => |em| {
             decl.analysis = .codegen_failure;
-            try module.failed_decls.put(module.gpa, decl, em);
+            try module.failed_decls.put(module.gpa, decl_index, em);
             log.err("{s}", .{em.msg});
             return error.AnalysisFail;
         },
@@ -3800,15 +3803,17 @@ pub fn lowerUnnamedConst(self: *MachO, typed_value: TypedValue, decl: *Module.De
     return atom.local_sym_index;
 }
 
-pub fn updateDecl(self: *MachO, module: *Module, decl: *Module.Decl) !void {
+pub fn updateDecl(self: *MachO, module: *Module, decl_index: Module.Decl.Index) !void {
     if (build_options.skip_non_native and builtin.object_format != .macho) {
         @panic("Attempted to compile for object format that was disabled by build configuration");
     }
     if (build_options.have_llvm) {
-        if (self.llvm_object) |llvm_object| return llvm_object.updateDecl(module, decl);
+        if (self.llvm_object) |llvm_object| return llvm_object.updateDecl(module, decl_index);
     }
     const tracy = trace(@src());
     defer tracy.end();
+
+    const decl = module.declPtr(decl_index);
 
     if (decl.val.tag() == .extern_fn) {
         return; // TODO Should we do more when front-end analyzed extern decl?
@@ -3824,7 +3829,7 @@ pub fn updateDecl(self: *MachO, module: *Module, decl: *Module.Decl) !void {
     defer code_buffer.deinit();
 
     var decl_state: ?Dwarf.DeclState = if (self.d_sym) |*d_sym|
-        try d_sym.dwarf.initDeclState(decl)
+        try d_sym.dwarf.initDeclState(module, decl)
     else
         null;
     defer if (decl_state) |*ds| ds.deinit();
@@ -3862,7 +3867,7 @@ pub fn updateDecl(self: *MachO, module: *Module, decl: *Module.Decl) !void {
             },
             .fail => |em| {
                 decl.analysis = .codegen_failure;
-                try module.failed_decls.put(module.gpa, decl, em);
+                try module.failed_decls.put(module.gpa, decl_index, em);
                 return;
             },
         }
@@ -3882,8 +3887,8 @@ pub fn updateDecl(self: *MachO, module: *Module, decl: *Module.Decl) !void {
 
     // Since we updated the vaddr and the size, each corresponding export symbol also
     // needs to be updated.
-    const decl_exports = module.decl_exports.get(decl) orelse &[0]*Module.Export{};
-    try self.updateDeclExports(module, decl, decl_exports);
+    const decl_exports = module.decl_exports.get(decl_index) orelse &[0]*Module.Export{};
+    try self.updateDeclExports(module, decl_index, decl_exports);
 }
 
 /// Checks if the value, or any of its embedded values stores a pointer, and thus requires
@@ -4030,7 +4035,8 @@ fn placeDecl(self: *MachO, decl: *Module.Decl, code_len: usize) !*macho.nlist_64
     assert(decl.link.macho.local_sym_index != 0); // Caller forgot to call allocateDeclIndexes()
     const symbol = &self.locals.items[decl.link.macho.local_sym_index];
 
-    const sym_name = try decl.getFullyQualifiedName(self.base.allocator);
+    const module = self.base.options.module.?;
+    const sym_name = try decl.getFullyQualifiedName(module);
     defer self.base.allocator.free(sym_name);
 
     const decl_ptr = self.decls.getPtr(decl).?;
@@ -4101,19 +4107,20 @@ pub fn updateDeclLineNumber(self: *MachO, module: *Module, decl: *const Module.D
 pub fn updateDeclExports(
     self: *MachO,
     module: *Module,
-    decl: *Module.Decl,
+    decl_index: Module.Decl.Index,
     exports: []const *Module.Export,
 ) !void {
     if (build_options.skip_non_native and builtin.object_format != .macho) {
         @panic("Attempted to compile for object format that was disabled by build configuration");
     }
     if (build_options.have_llvm) {
-        if (self.llvm_object) |llvm_object| return llvm_object.updateDeclExports(module, decl, exports);
+        if (self.llvm_object) |llvm_object| return llvm_object.updateDeclExports(module, decl_index, exports);
     }
     const tracy = trace(@src());
     defer tracy.end();
 
     try self.globals.ensureUnusedCapacity(self.base.allocator, exports.len);
+    const decl = module.declPtr(decl_index);
     if (decl.link.macho.local_sym_index == 0) return;
     const decl_sym = &self.locals.items[decl.link.macho.local_sym_index];
 
